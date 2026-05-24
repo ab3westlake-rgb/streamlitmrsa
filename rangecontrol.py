@@ -118,7 +118,7 @@ def clear_uploaded_data():
     # Reset the uploader widget by changing its key
     st.session_state["upload_key"] = st.session_state.get("upload_key", 0) + 1
     st.success("Uploaded data cleared from the session.")
-    st.experimental_rerun()
+    st.rerun()
 
 def auto_delete_after_export(clicked: bool):
     """If a download button was clicked, clear uploaded data immediately."""
