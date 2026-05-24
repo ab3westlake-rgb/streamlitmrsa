@@ -40,57 +40,55 @@ except Exception:
     pdf_available = False
 
 
-# ------------------------ Streamlit UI ------------------------
+# ------------------------ PAGE CONFIG ------------------------
 st.set_page_config(page_title="MRSA Infection Rate Visual", layout="wide")
-st.title("MRSA Infection Rate (per 1,000 BDOC) — Time-Range Groups")
 
-st.markdown(
+# ------------------------ LOGIN SCREEN (blocking gate) ------------------------
+def render_login_gate():
     """
-    Upload a dataset containing **either**:
-    - **Pre‑aggregated groups** with columns: **Group**, **Group Infections**, **Group BedDays**, optional **Alpha Selected**  
-    - **Raw time‑series** with columns: **Date**, **Infections**, **BedDays** (use the *Custom date ranges* mode)
+    Show a dedicated sign-in screen and block the rest of the app until authenticated.
 
-    Adjust α and display options in the sidebar.
+    Required secrets structure (local .streamlit/secrets.toml or Cloud Secrets):
+    [auth]
+    allowed_emails = [
+      "natalie.hicks1@va.gov",
+      "brian.mccauley@va.gov",
+      "gio.baraccolira@va.gov",
+      "amanda.westlake@va.gov"
+    ]
+    admin_email = "amanda.westlake@va.gov"
+    passcode = "CHANGE_ME_TO_A_SECURE_VALUE"
     """
-)
-
-# ------------------------ LOGIN GATE (email + passcode from secrets) ------------------------
-def ensure_login():
-    # Validate secrets presence
     if "auth" not in st.secrets or "allowed_emails" not in st.secrets["auth"]:
         st.error(
-            "Authentication is not configured. "
-            "Add `.streamlit/secrets.toml` with [auth] → allowed_emails, admin_email, passcode. "
-            "On Streamlit Cloud, paste these in App → Settings → Secrets."
+            "Authentication is not configured.\n\n"
+            "Add `.streamlit/secrets.toml` with:\n"
+            "[auth]\nallowed_emails = [\"natalie.hicks1@va.gov\", \"brian.mccauley@va.gov\", "
+            "\"gio.baraccolira@va.gov\", \"amanda.westlake@va.gov\"]\n"
+            "admin_email = \"amanda.westlake@va.gov\"\npasscode = \"CHANGE_ME_TO_A_SECURE_VALUE\""
         )
         st.stop()
 
-    allowed = set([e.lower().strip() for e in st.secrets["auth"]["allowed_emails"]])
+    allowed = {e.lower().strip() for e in st.secrets["auth"]["allowed_emails"]}
     admin_email = st.secrets["auth"].get("admin_email", "").lower().strip()
     passcode_secret = st.secrets["auth"].get("passcode", "")
 
-    # If already logged in, show who & add logout
+    # If already authenticated, allow app to continue
     if st.session_state.get("authenticated"):
-        who = st.session_state.get("user_email", "")
-        role = "Admin" if who.lower() == admin_email else "Viewer"
-        with st.sidebar:
-            st.success(f"Signed in as {who} ({role})")
-            if st.button("Logout"):
-                st.session_state.clear()
-                st.rerun()
-        return  # let app continue
+        return
 
-    # Not logged in → show login form
-    st.divider()
-    st.subheader("Sign in")
+    # Dedicated sign-in page
+    st.title("Sign in to MRSA Infection Rate Visual")
+    st.caption("Only authorized users may access this app. Enter your **VA email** and the **passcode**.")
+
     with st.form(key="login_form", clear_on_submit=False):
         email = st.text_input("Email address", value="", placeholder="name@va.gov")
         passcode = st.text_input("Passcode", value="", type="password")
-        submit = st.form_submit_button("Login")
+        submit = st.form_submit_button("Sign in")
 
     if submit:
         email_norm = email.lower().strip()
-        if email_norm in allowed and passcode == passcode_secret and passcode_secret:
+        if email_norm in allowed and passcode_secret and (passcode == passcode_secret):
             st.session_state["authenticated"] = True
             st.session_state["user_email"] = email_norm
             st.session_state["user_role"] = "Admin" if email_norm == admin_email else "Viewer"
@@ -99,12 +97,27 @@ def ensure_login():
         else:
             st.error("Access denied. Check your email and passcode.")
 
-# Enforce login at the very top
-ensure_login()
-# ---------------------------------------------------------------------
+    # Block the remainder of the app until authenticated
+    st.stop()
 
-# Sidebar controls
+# Call the gate immediately so the rest of the file only runs after sign-in
+render_login_gate()
+
+
+# ------------------------ HEADER ------------------------
+st.title("MRSA Infection Rate (per 1,000 BDOC) — Time-Range Groups")
+
+# Sidebar controls + logout
 with st.sidebar:
+    # Show signed-in user
+    who = st.session_state.get("user_email", "")
+    role = st.session_state.get("user_role", "Viewer")
+    if who:
+        st.success(f"Signed in as {who} ({role})")
+        if st.button("Logout"):
+            st.session_state.clear()
+            st.rerun()
+
     st.header("Controls")
     alpha_override = st.checkbox("Override α (alpha) manually", value=False)
     alpha_manual = st.slider("α (significance level)", 0.001, 0.20, 0.05, 0.001)
@@ -481,7 +494,7 @@ def export_pptx(img_png_bytes: bytes, rates_df: pd.DataFrame, p_df: pd.DataFrame
     p_left = rates_left + rates_width + Inches(0.2)
     p_top = rates_top
     p_width = Inches(4.5)
-    p_height = Inches(4.2)
+    p_height = rates_height
     tbl_p = slide2.shapes.add_table(p_rows, p_cols, p_left, p_top, p_width, p_height).table
     tbl_p.cell(0, 0).text = "Row/Col"
     hdr = tbl_p.cell(0, 0).text_frame.paragraphs[0]
