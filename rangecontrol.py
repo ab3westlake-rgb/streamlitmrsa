@@ -9,6 +9,8 @@ from datetime import datetime, date
 import numpy as np
 import pandas as pd
 import streamlit as st
+import matplotlib
+matplotlib.use("Agg")  # headless-safe backend
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.colors import TwoSlopeNorm
@@ -59,8 +61,12 @@ with st.sidebar:
     alpha_manual = st.slider("α (significance level)", 0.001, 0.20, 0.05, 0.001)
     show_annotations = st.checkbox("Show numeric annotations in heatmap", value=True)
     show_ci_labels = st.checkbox("Show CI labels above bars", value=True)
-    # NEW: toggle to choose input style
-    use_date_picker = st.checkbox("Use date pickers (instead of typing dates)", value=True, help="Uncheck to enter dates as text (YYYY-MM-DD)")
+    # Toggle to choose input style
+    use_date_picker = st.checkbox(
+        "Use date pickers (instead of typing dates)",
+        value=True,
+        help="Uncheck to enter dates as text (YYYY-MM-DD)"
+    )
 
 # >>> Mode selector ABOVE the upload <<<
 mode = st.radio(
@@ -69,8 +75,17 @@ mode = st.radio(
     horizontal=True,
 )
 
+# --- Uploader key (used to reset/clear files) ---
+if "upload_key" not in st.session_state:
+    st.session_state["upload_key"] = 0
+
 # ----- Upload widget -----
-uploaded = st.file_uploader("Upload Excel or CSV file", type=["xlsx", "csv"])
+uploaded = st.file_uploader(
+    "Upload Excel or CSV file",
+    type=["xlsx", "csv"],
+    key=st.session_state["upload_key"]
+)
+st.session_state["uploaded_file"] = uploaded  # store reference so we can clear
 
 # Sample data (used if no file uploaded) — pre-aggregated
 def sample_aggregated():
@@ -93,6 +108,26 @@ else:
 
 st.subheader("Data preview")
 st.dataframe(df_raw, use_container_width=True)
+
+
+# ------------------------ CLEAR & CLEANUP HELPERS ------------------------
+def clear_uploaded_data():
+    """Clear any uploaded file and in-memory artifacts, then rerun."""
+    for key in ["uploaded_file", "df_raw", "img_png_bytes"]:
+        st.session_state.pop(key, None)
+    # Reset the uploader widget by changing its key
+    st.session_state["upload_key"] = st.session_state.get("upload_key", 0) + 1
+    st.success("Uploaded data cleared from the session.")
+    st.experimental_rerun()
+
+def auto_delete_after_export(clicked: bool):
+    """If a download button was clicked, clear uploaded data immediately."""
+    if clicked:
+        clear_uploaded_data()
+
+# Place a manual clear button near the top (visible in both modes)
+st.button("🧹 Clear uploaded data", on_click=clear_uploaded_data)
+
 
 # ------------------------ Utilities ------------------------
 def coerce_datetime(series: pd.Series) -> pd.Series:
@@ -131,7 +166,7 @@ def aggregate_from_ranges(
 def ranges_overlap(a_start: date, a_end: date, b_start: date, b_end: date) -> bool:
     return (a_start <= b_end) and (b_start <= a_end)
 
-# NEW: parsing helpers for text inputs
+# parsing helpers for text inputs
 def parse_date_text(text_value: str) -> date | None:
     """Parse text like 'YYYY-MM-DD' into date; returns None if invalid."""
     if not text_value:
@@ -290,8 +325,8 @@ def compute_and_plot(
 
     # Per-bar labels
     for i, r in enumerate(rates):
-        y_mid = rates[i] / 2.0
-        if rates[i] <= 0:
+        y_mid = r / 2.0
+        if r <= 0:
             y_mid = max(upper_1000[i] * 0.05, 0.02)
         ax_b.text(
             i, y_mid, f"{r:.2f}",
@@ -366,10 +401,11 @@ def export_pptx(img_png_bytes: bytes, rates_df: pd.DataFrame, p_df: pd.DataFrame
     PPTX with:
       - Slide 1: Title + Chart (scaled)
       - Slide 2: Rates table + p-value matrix (smaller fonts)
-      - Footer on each slide: 'generated on MM-DD-YYYY'
+      - Footer on each slide: 'Generated on MM-DD-YYYY', right-aligned
     """
     from pptx import Presentation
     from pptx.util import Inches, Pt
+    from pptx.enum.text import PP_ALIGN
 
     prs = Presentation()
 
@@ -401,7 +437,7 @@ def export_pptx(img_png_bytes: bytes, rates_df: pd.DataFrame, p_df: pd.DataFrame
     fp = footer_box.text_frame.paragraphs[0]
     fp.text = footer_text
     fp.font.size = Pt(9)
-    fp.alignment = PP_ALIGN.RIGHT
+    fp.alignment = PP_ALIGN.RIGHT  # ensure right-edge alignment
 
     # --- Slide 2: Tables ---
     slide2 = prs.slides.add_slide(prs.slide_layouts[5])
@@ -484,7 +520,7 @@ def export_pdf(img_png_bytes: bytes, rates_df: pd.DataFrame, p_df: pd.DataFrame,
     Two-page PDF (landscape letter) via ReportLab Platypus:
       - Page 1: Title + scaled chart image
       - Page 2: Rates table + p-value matrix
-      - Footer on each page: 'generated on MM-DD-YYYY'
+      - Footer on each page: 'Generated on MM-DD-YYYY' bottom-right
     """
     from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
@@ -519,18 +555,16 @@ def export_pdf(img_png_bytes: bytes, rates_df: pd.DataFrame, p_df: pd.DataFrame,
     header_style.fontSize = 12
     header_style.leading = 14
 
-    # ----- Footer callback -----
+    # ----- Footer callback (bottom-right) -----
     def add_footer(canvas_obj, doc_obj):
         canvas_obj.setFont("Helvetica", 9)
-        # place footer near bottom-right
         page_w, page_h = landscape(letter)
-        text_w = canvas_obj.stringWidth(footer_text, "Helvetica", 9)
+        # Draw so the RIGHT edge lands at (page_w - rightMargin)
         canvas_obj.drawRightString(
-        page_w - doc_obj.rightMargin,
-        doc_obj.bottomMargin / 2,         # nicely above the bottom edge
-        footer_text
-    )
-
+            page_w - doc_obj.rightMargin,
+            doc_obj.bottomMargin / 2,       # vertical position above bottom edge
+            footer_text
+        )
 
     # ----- Build content -----
     story = []
@@ -612,6 +646,7 @@ if mode == "Pre‑aggregated groups":
     buf_png = io.BytesIO()
     fig.savefig(buf_png, format="png", dpi=160, bbox_inches="tight")
     img_png_bytes = buf_png.getvalue()
+    st.session_state["img_png_bytes"] = img_png_bytes  # store to clear later
 
     st.pyplot(fig, clear_figure=False)
     st.caption(f"α used: {alpha_used:.3f} — {alpha_source}")
@@ -628,24 +663,38 @@ if mode == "Pre‑aggregated groups":
         p_df = build_p_matrix_df(P)
         st.dataframe(p_df.style.format("{:.3f}"), use_container_width=True)
 
-    # Downloads
-    st.download_button("Download figure as PNG", data=img_png_bytes,
-                       file_name="mrsa_rates_pvalues.png", mime="image/png")
+    # Downloads (auto-delete after export)
+    png_clicked = st.download_button(
+        "Download figure as PNG",
+        data=img_png_bytes,
+        file_name="mrsa_rates_pvalues.png",
+        mime="image/png"
+    )
+    auto_delete_after_export(png_clicked)
 
     col1, col2 = st.columns(2)
     with col1:
         if pptx_available and (rates_df is not None) and (p_df is not None):
             pptx_buf = export_pptx(img_png_bytes, rates_df, p_df, alpha_used if alpha_used is not None else alpha_effective)
-            st.download_button("Download PowerPoint (.pptx)", data=pptx_buf.getvalue(),
-                               file_name="mrsa_rates_pvalues.pptx",
-                               mime="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+            pptx_clicked = st.download_button(
+                "Download PowerPoint (.pptx)",
+                data=pptx_buf.getvalue(),
+                file_name="mrsa_rates_pvalues.pptx",
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            )
+            auto_delete_after_export(pptx_clicked)
         elif not pptx_available:
             st.info("PowerPoint export unavailable. Install: `pip install python-pptx`")
     with col2:
         if pdf_available and (rates_df is not None) and (p_df is not None):
             pdf_buf = export_pdf(img_png_bytes, rates_df, p_df, alpha_used if alpha_used is not None else alpha_effective)
-            st.download_button("Download PDF (.pdf)", data=pdf_buf.getvalue(),
-                               file_name="mrsa_rates_pvalues.pdf", mime="application/pdf")
+            pdf_clicked = st.download_button(
+                "Download PDF (.pdf)",
+                data=pdf_buf.getvalue(),
+                file_name="mrsa_rates_pvalues.pdf",
+                mime="application/pdf"
+            )
+            auto_delete_after_export(pdf_clicked)
         elif not pdf_available:
             st.info("PDF export unavailable. Install: `pip install reportlab`")
 
@@ -736,6 +785,7 @@ else:
     buf_png = io.BytesIO()
     fig.savefig(buf_png, format="png", dpi=160, bbox_inches="tight")
     img_png_bytes = buf_png.getvalue()
+    st.session_state["img_png_bytes"] = img_png_bytes
 
     st.pyplot(fig, clear_figure=False)
     st.caption(f"α used: {alpha_used:.3f} — {alpha_source}")
@@ -753,23 +803,37 @@ else:
         p_df = build_p_matrix_df(P)
         st.dataframe(p_df.style.format("{:.3f}"), use_container_width=True)
 
-    # Downloads
-    st.download_button("Download figure as PNG", data=img_png_bytes,
-                       file_name="mrsa_rates_pvalues.png", mime="image/png")
+    # Downloads (auto-delete after export)
+    png_clicked = st.download_button(
+        "Download figure as PNG",
+        data=img_png_bytes,
+        file_name="mrsa_rates_pvalues.png",
+        mime="image/png"
+    )
+    auto_delete_after_export(png_clicked)
 
     col1, col2 = st.columns(2)
     with col1:
         if pptx_available and (rates_df is not None) and (p_df is not None):
             pptx_buf = export_pptx(img_png_bytes, rates_df, p_df, alpha_used if alpha_used is not None else alpha_effective)
-            st.download_button("Download PowerPoint (.pptx)", data=pptx_buf.getvalue(),
-                               file_name="mrsa_rates_pvalues.pptx",
-                               mime="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+            pptx_clicked = st.download_button(
+                "Download PowerPoint (.pptx)",
+                data=pptx_buf.getvalue(),
+                file_name="mrsa_rates_pvalues.pptx",
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            )
+            auto_delete_after_export(pptx_clicked)
         elif not pptx_available:
             st.info("PowerPoint export unavailable. Install: `pip install python-pptx`")
     with col2:
         if pdf_available and (rates_df is not None) and (p_df is not None):
             pdf_buf = export_pdf(img_png_bytes, rates_df, p_df, alpha_used if alpha_used is not None else alpha_effective)
-            st.download_button("Download PDF (.pdf)", data=pdf_buf.getvalue(),
-                               file_name="mrsa_rates_pvalues.pdf", mime="application/pdf")
+            pdf_clicked = st.download_button(
+                "Download PDF (.pdf)",
+                data=pdf_buf.getvalue(),
+                file_name="mrsa_rates_pvalues.pdf",
+                mime="application/pdf"
+            )
+            auto_delete_after_export(pdf_clicked)
         elif not pdf_available:
             st.info("PDF export unavailable. Install: `pip install reportlab`")
