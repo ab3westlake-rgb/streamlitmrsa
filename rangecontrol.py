@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib
-matplotlib.use("Agg")  # headless-safe backend
+matplotlib.use("Agg")  # Headless-safe backend for Streamlit Cloud
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.colors import TwoSlopeNorm
@@ -30,7 +30,7 @@ try:
     from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
     from reportlab.pdfgen import canvas
-    from reportlab.lib.utils import ImageReader  # for drawing images if needed
+    from reportlab.lib.utils import ImageReader
     from reportlab.lib import colors
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle, PageBreak
@@ -54,6 +54,55 @@ st.markdown(
     """
 )
 
+# ------------------------ LOGIN GATE (email + passcode from secrets) ------------------------
+def ensure_login():
+    # Validate secrets presence
+    if "auth" not in st.secrets or "allowed_emails" not in st.secrets["auth"]:
+        st.error(
+            "Authentication is not configured. "
+            "Add `.streamlit/secrets.toml` with [auth] → allowed_emails, admin_email, passcode. "
+            "On Streamlit Cloud, paste these in App → Settings → Secrets."
+        )
+        st.stop()
+
+    allowed = set([e.lower().strip() for e in st.secrets["auth"]["allowed_emails"]])
+    admin_email = st.secrets["auth"].get("admin_email", "").lower().strip()
+    passcode_secret = st.secrets["auth"].get("passcode", "")
+
+    # If already logged in, show who & add logout
+    if st.session_state.get("authenticated"):
+        who = st.session_state.get("user_email", "")
+        role = "Admin" if who.lower() == admin_email else "Viewer"
+        with st.sidebar:
+            st.success(f"Signed in as {who} ({role})")
+            if st.button("Logout"):
+                st.session_state.clear()
+                st.rerun()
+        return  # let app continue
+
+    # Not logged in → show login form
+    st.divider()
+    st.subheader("Sign in")
+    with st.form(key="login_form", clear_on_submit=False):
+        email = st.text_input("Email address", value="", placeholder="name@va.gov")
+        passcode = st.text_input("Passcode", value="", type="password")
+        submit = st.form_submit_button("Login")
+
+    if submit:
+        email_norm = email.lower().strip()
+        if email_norm in allowed and passcode == passcode_secret and passcode_secret:
+            st.session_state["authenticated"] = True
+            st.session_state["user_email"] = email_norm
+            st.session_state["user_role"] = "Admin" if email_norm == admin_email else "Viewer"
+            st.success("Login successful.")
+            st.rerun()
+        else:
+            st.error("Access denied. Check your email and passcode.")
+
+# Enforce login at the very top
+ensure_login()
+# ---------------------------------------------------------------------
+
 # Sidebar controls
 with st.sidebar:
     st.header("Controls")
@@ -61,14 +110,13 @@ with st.sidebar:
     alpha_manual = st.slider("α (significance level)", 0.001, 0.20, 0.05, 0.001)
     show_annotations = st.checkbox("Show numeric annotations in heatmap", value=True)
     show_ci_labels = st.checkbox("Show CI labels above bars", value=True)
-    # Toggle to choose input style
     use_date_picker = st.checkbox(
         "Use date pickers (instead of typing dates)",
         value=True,
         help="Uncheck to enter dates as text (YYYY-MM-DD)"
     )
 
-# >>> Mode selector ABOVE the upload <<<
+# Mode selector ABOVE the upload
 mode = st.radio(
     "Select data mode",
     ["Pre‑aggregated groups", "Custom date ranges (up to 4 groups)"],
@@ -99,7 +147,7 @@ def sample_aggregated():
 # Read uploaded file
 if uploaded is not None:
     if uploaded.name.endswith(".xlsx"):
-        df_raw = pd.read_excel(uploaded)  # first sheet by default
+        df_raw = pd.read_excel(uploaded)
     else:
         df_raw = pd.read_csv(uploaded)
 else:
@@ -115,7 +163,6 @@ def clear_uploaded_data():
     """Clear any uploaded file and in-memory artifacts, then rerun."""
     for key in ["uploaded_file", "df_raw", "img_png_bytes"]:
         st.session_state.pop(key, None)
-    # Reset the uploader widget by changing its key
     st.session_state["upload_key"] = st.session_state.get("upload_key", 0) + 1
     st.success("Uploaded data cleared from the session.")
     st.rerun()
@@ -125,7 +172,7 @@ def auto_delete_after_export(clicked: bool):
     if clicked:
         clear_uploaded_data()
 
-# Place a manual clear button near the top (visible in both modes)
+# Manual clear button
 st.button("🧹 Clear uploaded data", on_click=clear_uploaded_data)
 
 
@@ -140,11 +187,6 @@ def aggregate_from_ranges(
     bd_col: str,
     groups_spec: List[Dict[str, Tuple]]
 ) -> pd.DataFrame:
-    """
-    Aggregate raw time‑series rows into N groups based on date ranges.
-    groups_spec: list of dicts like {"label": str, "start": date, "end": date, "enabled": bool}
-    Returns DataFrame with columns: Group, Group Infections, Group BedDays
-    """
     df = df_ts.copy()
     df[date_col] = coerce_datetime(df[date_col])
     df = df.dropna(subset=[date_col])
@@ -166,9 +208,7 @@ def aggregate_from_ranges(
 def ranges_overlap(a_start: date, a_end: date, b_start: date, b_end: date) -> bool:
     return (a_start <= b_end) and (b_start <= a_end)
 
-# parsing helpers for text inputs
 def parse_date_text(text_value: str) -> date | None:
-    """Parse text like 'YYYY-MM-DD' into date; returns None if invalid."""
     if not text_value:
         return None
     try:
@@ -188,33 +228,23 @@ def group_range_inputs(
     max_dt: date,
     disabled: bool = False
 ) -> Tuple[str, date | None, date | None, bool]:
-    """
-    Render inputs for one group's label and date range.
-    Returns (label, start_date, end_date, enabled_flag)
-    """
-    # Name field
     name = st.text_input(f"{group_label} name", value=group_label, disabled=disabled, key=f"{key_prefix}_name")
-    # Enable/disable if optional
     enabled_flag = enabled
     if group_label not in ["Group 1", "Group 2"]:
         enabled_flag = st.checkbox(f"Enable {name if name else group_label}", value=enabled, key=f"{key_prefix}_enable")
 
-    # Date inputs
     start_date, end_date = None, None
     if use_picker:
-        # Date picker with a range (tuple)
         dr = st.date_input(
             f"Date range for {name if name else group_label}",
             value=(default_start, default_end),
-            min_value=min_dt,
-            max_value=max_dt,
+            min_value=min_dt, max_value=max_dt,
             key=f"{key_prefix}_picker",
             disabled=not enabled_flag or disabled
         )
         if isinstance(dr, tuple) and len(dr) == 2:
             start_date, end_date = dr[0], dr[1]
     else:
-        # Text fields with parsing/validation
         colA, colB = st.columns(2)
         with colA:
             start_text = st.text_input(
@@ -235,7 +265,6 @@ def group_range_inputs(
         start_date = parse_date_text(start_text)
         end_date = parse_date_text(end_text)
 
-        # Validation messages
         if enabled_flag and not disabled:
             if start_date is None:
                 st.warning(f"Invalid start date for **{name or group_label}**. Please use YYYY-MM-DD.")
@@ -259,7 +288,6 @@ def compute_and_plot(
     show_ann: bool,
     show_ci: bool
 ):
-    # Required columns for aggregated input
     required = ["Group", "Group Infections", "Group BedDays"]
     for col in required:
         if col not in df.columns:
@@ -277,13 +305,11 @@ def compute_and_plot(
         alpha = float(alpha_input)
         alpha_source = "from manual slider"
 
-    # Clean & order
     clean_df = df[["Group", "Group Infections", "Group BedDays"]].dropna().drop_duplicates()
     labels = clean_df["Group"].astype(str).tolist()
     counts = clean_df["Group Infections"].astype(float).values
     nobs   = clean_df["Group BedDays"].astype(float).values
 
-    # Guardrails
     mask_valid = nobs > 0
     if (~mask_valid).any() or len(clean_df) < 2:
         fig, ax = plt.subplots(figsize=(6, 3))
@@ -296,13 +322,11 @@ def compute_and_plot(
         plt.tight_layout()
         return fig, None, None, None, alpha, alpha_source
 
-    # ---------- Rates & Wilson CIs (per 1,000 BDOC) ----------
     rates = (counts / nobs) * 1000.0
     lower, upper = proportion_confint(count=counts, nobs=nobs, alpha=alpha, method='wilson')
     lower_1000, upper_1000 = lower * 1000.0, upper * 1000.0
     yerr = np.abs(np.vstack([rates - lower_1000, upper_1000 - rates]))
 
-    # ---------- Pairwise p-value matrix ----------
     k = len(labels)
     P = np.full((k, k), np.nan)
     for i, j in itertools.combinations(range(k), 2):
@@ -310,14 +334,13 @@ def compute_and_plot(
         P[i, j] = P[j, i] = pval
     np.fill_diagonal(P, 1.0)
 
-    # ---------- Figure layout ----------
     fig = plt.figure(figsize=(14, 5.5))
     gs = fig.add_gridspec(2, 2, height_ratios=[1, 0.15], width_ratios=[3.5, 2])
 
     # Bars
     ax_b = fig.add_subplot(gs[0, 0])
     x = np.arange(k)
-    ax_b.bar(x, rates, yerr=yerr, capsize=6, color='#5f9ea0')  # cadetblue
+    ax_b.bar(x, rates, yerr=yerr, capsize=6, color='#5f9ea0')
     ax_b.set_xticks(x)
     ax_b.set_xticklabels(labels, rotation=0, ha='center', fontsize=10)
     ax_b.set_ylabel('Rate per 1,000 BDOC')
@@ -336,6 +359,7 @@ def compute_and_plot(
         )
         if show_ci:
             y_ci = upper_1000[i] * 1.01
+            # ---- FIXED: index the arrays and format the elements ----
             ci_label = f"{int((1 - alpha) * 100)}% CI [{lower_1000[i]:.2f}, {upper_1000[i]:.2f}]"
             ax_b.text(i, y_ci, ci_label, ha='center', va='bottom', fontsize=8, color='black')
 
@@ -358,7 +382,6 @@ def compute_and_plot(
     cbar = fig.colorbar(im, ax=ax_m, fraction=0.04, pad=0.06)
     cbar.ax.set_ylabel('p-value', rotation=270, labelpad=12)
 
-    # Stars and numbers when p < alpha
     if show_ann:
         for i in range(k):
             for j in range(k):
@@ -395,31 +418,15 @@ def build_p_matrix_df(P: np.ndarray) -> pd.DataFrame:
     return pd.DataFrame(P, index=idx, columns=idx)
 
 
-# ---------- IMPROVED PowerPoint export (with footer) ----------
 def export_pptx(img_png_bytes: bytes, rates_df: pd.DataFrame, p_df: pd.DataFrame, alpha: float) -> io.BytesIO:
-    """
-    PPTX with:
-      - Slide 1: Title + Chart (scaled)
-      - Slide 2: Rates table + p-value matrix (smaller fonts)
-      - Footer on each slide: 'Generated on MM-DD-YYYY', right-aligned
-    """
-    from pptx import Presentation
-    from pptx.util import Inches, Pt
-    from pptx.enum.text import PP_ALIGN
-
     prs = Presentation()
-
-    # Uncomment to use widescreen slides:
-    # prs.slide_width = Inches(13.333)
-    # prs.slide_height = Inches(7.5)
-
     date_str = datetime.now().strftime("%m-%d-%Y")
     footer_text = f"Generated on {date_str}"
 
     left_margin = Inches(0.5)
     top_margin = Inches(0.6)
 
-    # --- Slide 1: Title + Chart ---
+    # Slide 1: Title + Chart
     slide1 = prs.slides.add_slide(prs.slide_layouts[5])  # Title Only
     title = slide1.shapes.title
     title.text = f"MRSA Infection Rate (per 1,000 BDOC) — α = {alpha:.3f}"
@@ -428,7 +435,7 @@ def export_pptx(img_png_bytes: bytes, rates_df: pd.DataFrame, p_df: pd.DataFrame
     img_stream = io.BytesIO(img_png_bytes)
     slide1.shapes.add_picture(img_stream, left_margin, top_margin + Inches(0.6), width=Inches(9.0))
 
-    # Footer (right bottom)
+    # Footer right-aligned
     tx_width = Inches(4.0)
     tx_height = Inches(0.3)
     tx_left = prs.slide_width - (left_margin + tx_width)
@@ -437,9 +444,9 @@ def export_pptx(img_png_bytes: bytes, rates_df: pd.DataFrame, p_df: pd.DataFrame
     fp = footer_box.text_frame.paragraphs[0]
     fp.text = footer_text
     fp.font.size = Pt(9)
-    fp.alignment = PP_ALIGN.RIGHT  # ensure right-edge alignment
+    fp.alignment = PP_ALIGN.RIGHT
 
-    # --- Slide 2: Tables ---
+    # Slide 2: Tables
     slide2 = prs.slides.add_slide(prs.slide_layouts[5])
     t2 = slide2.shapes.title
     t2.text = "Summary Tables"
@@ -474,7 +481,7 @@ def export_pptx(img_png_bytes: bytes, rates_df: pd.DataFrame, p_df: pd.DataFrame
     p_left = rates_left + rates_width + Inches(0.2)
     p_top = rates_top
     p_width = Inches(4.5)
-    p_height = rates_height
+    p_height = Inches(4.2)
     tbl_p = slide2.shapes.add_table(p_rows, p_cols, p_left, p_top, p_width, p_height).table
     tbl_p.cell(0, 0).text = "Row/Col"
     hdr = tbl_p.cell(0, 0).text_frame.paragraphs[0]
@@ -507,35 +514,17 @@ def export_pptx(img_png_bytes: bytes, rates_df: pd.DataFrame, p_df: pd.DataFrame
     fp2.font.size = Pt(9)
     fp2.alignment = PP_ALIGN.RIGHT
 
-    # Output buffer
     out = io.BytesIO()
     prs.save(out)
     out.seek(0)
     return out
 
 
-# ---------- IMPROVED PDF export (landscape + footer) ----------
 def export_pdf(img_png_bytes: bytes, rates_df: pd.DataFrame, p_df: pd.DataFrame, alpha: float) -> io.BytesIO:
-    """
-    Two-page PDF (landscape letter) via ReportLab Platypus:
-      - Page 1: Title + scaled chart image
-      - Page 2: Rates table + p-value matrix
-      - Footer on each page: 'Generated on MM-DD-YYYY' bottom-right
-    """
-    from reportlab.lib.pagesizes import letter, landscape
-    from reportlab.lib.units import inch
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle, PageBreak
-    from reportlab.lib.styles import getSampleStyleSheet
-    from reportlab.lib import colors
-
-    # Footer string
     date_str = datetime.now().strftime("%m-%d-%Y")
     footer_text = f"Generated on {date_str}"
 
-    # PDF buffer
     out = io.BytesIO()
-
-    # Landscape document with margins
     doc = SimpleDocTemplate(
         out,
         pagesize=landscape(letter),
@@ -545,45 +534,31 @@ def export_pdf(img_png_bytes: bytes, rates_df: pd.DataFrame, p_df: pd.DataFrame,
         bottomMargin=0.6 * inch,
     )
 
-    # Styles
     styles = getSampleStyleSheet()
-    title_style = styles["Heading2"]
-    title_style.fontSize = 16
-    title_style.leading = 18
+    title_style = styles["Heading2"]; title_style.fontSize = 16; title_style.leading = 18
+    header_style = styles["Heading4"]; header_style.fontSize = 12; header_style.leading = 14
 
-    header_style = styles["Heading4"]
-    header_style.fontSize = 12
-    header_style.leading = 14
-
-    # ----- Footer callback (bottom-right) -----
     def add_footer(canvas_obj, doc_obj):
         canvas_obj.setFont("Helvetica", 9)
-        page_w, page_h = landscape(letter)
-        # Draw so the RIGHT edge lands at (page_w - rightMargin)
+        page_w, _ = landscape(letter)
         canvas_obj.drawRightString(
             page_w - doc_obj.rightMargin,
-            doc_obj.bottomMargin / 2,       # vertical position above bottom edge
+            doc_obj.bottomMargin / 2,
             footer_text
         )
 
-    # ----- Build content -----
     story = []
-
-    # Page 1: Title + chart
     story.append(Paragraph(f"MRSA Infection Rate (per 1,000 BDOC) — α = {alpha:.3f}", title_style))
     story.append(Spacer(1, 0.25 * inch))
 
     img = Image(io.BytesIO(img_png_bytes))
-    # Max size for landscape letter content area
     img._restrictSize(9.5 * inch, 5.2 * inch)
     story.append(img)
     story.append(PageBreak())
 
-    # Page 2: Tables
     story.append(Paragraph("Summary Tables", header_style))
     story.append(Spacer(1, 0.15 * inch))
 
-    # Rates table
     rates_data = [["Group", "Rate per 1,000 BDOC"]] + [
         [str(g), f"{r:.2f}"] for g, r in zip(rates_df["Group"], rates_df["Rate per 1,000 BDOC"])
     ]
@@ -601,13 +576,11 @@ def export_pdf(img_png_bytes: bytes, rates_df: pd.DataFrame, p_df: pd.DataFrame,
     story.append(tbl_rates)
     story.append(Spacer(1, 0.25 * inch))
 
-    # p-matrix table with headers
     p_header = ["Row/Col"] + list(p_df.columns)
     p_data = [p_header] + [
         [idx] + [f"{v:.3f}" for v in p_df.loc[idx].values]
         for idx in p_df.index
     ]
-    # Auto col widths: first col narrow, remaining distributed
     total_width = 9.5 * inch
     first_col_w = 1.4 * inch
     remain = total_width - first_col_w
@@ -627,7 +600,6 @@ def export_pdf(img_png_bytes: bytes, rates_df: pd.DataFrame, p_df: pd.DataFrame,
     ]))
     story.append(tbl_p)
 
-    # Build with footer on all pages
     doc.build(story, onFirstPage=add_footer, onLaterPages=add_footer)
     out.seek(0)
     return out
@@ -642,11 +614,10 @@ if mode == "Pre‑aggregated groups":
         df_raw.copy(), alpha_effective, alpha_override, show_annotations, show_ci_labels
     )
 
-    # Save PNG before rendering (used for exports)
     buf_png = io.BytesIO()
     fig.savefig(buf_png, format="png", dpi=160, bbox_inches="tight")
     img_png_bytes = buf_png.getvalue()
-    st.session_state["img_png_bytes"] = img_png_bytes  # store to clear later
+    st.session_state["img_png_bytes"] = img_png_bytes
 
     st.pyplot(fig, clear_figure=False)
     st.caption(f"α used: {alpha_used:.3f} — {alpha_source}")
@@ -663,7 +634,6 @@ if mode == "Pre‑aggregated groups":
         p_df = build_p_matrix_df(P)
         st.dataframe(p_df.style.format("{:.3f}"), use_container_width=True)
 
-    # Downloads (auto-delete after export)
     png_clicked = st.download_button(
         "Download figure as PNG",
         data=img_png_bytes,
@@ -701,7 +671,6 @@ if mode == "Pre‑aggregated groups":
 # --- Mode 2: Custom date ranges (up to 4 groups) ---
 else:
     st.markdown("**Map your columns** (for raw time‑series data)")
-    # Auto-suggestions
     date_candidates = [c for c in df_raw.columns if "date" in c.lower()]
     inf_candidates = [c for c in df_raw.columns if "infect" in c.lower()] + [c for c in df_raw.columns if "case" in c.lower()]
     bd_candidates  = [c for c in df_raw.columns if "bed" in c.lower()] + [c for c in df_raw.columns if "bdoc" in c.lower()]
@@ -710,7 +679,6 @@ else:
     inf_col  = st.selectbox("Infections column", options=inf_candidates if inf_candidates else list(df_raw.columns))
     bd_col   = st.selectbox("BedDays column", options=bd_candidates if bd_candidates else list(df_raw.columns))
 
-    # Determine overall min/max dates to seed the inputs
     df_dates = df_raw.copy()
     df_dates[date_col] = coerce_datetime(df_dates[date_col])
     df_dates = df_dates.dropna(subset=[date_col])
@@ -722,36 +690,29 @@ else:
     max_dt = pd.to_datetime(df_dates[date_col].max()).date()
     st.write(f"Data date range detected: **{min_dt} → {max_dt}**")
 
-    # Up to 4 groups with custom names and toggle to delete/disable
     groups_spec = []
-
     st.subheader("Groups")
 
-    # Group 1 (always enabled)
     g1_label, g1_start, g1_end, _g1_enabled = group_range_inputs(
         "Group 1", min_dt, max_dt, "g1", True, use_date_picker, min_dt, max_dt, disabled=False
     )
     groups_spec.append({"label": g1_label, "start": g1_start, "end": g1_end, "enabled": True})
 
-    # Group 2 (always enabled)
     g2_label, g2_start, g2_end, _g2_enabled = group_range_inputs(
         "Group 2", min_dt, max_dt, "g2", True, use_date_picker, min_dt, max_dt, disabled=False
     )
     groups_spec.append({"label": g2_label, "start": g2_start, "end": g2_end, "enabled": True})
 
-    # Group 3 (optional)
     g3_label, g3_start, g3_end, g3_enabled = group_range_inputs(
         "Group 3", min_dt, max_dt, "g3", False, use_date_picker, min_dt, max_dt, disabled=False
     )
     groups_spec.append({"label": g3_label, "start": g3_start, "end": g3_end, "enabled": bool(g3_enabled)})
 
-    # Group 4 (optional)
     g4_label, g4_start, g4_end, g4_enabled = group_range_inputs(
         "Group 4", min_dt, max_dt, "g4", False, use_date_picker, min_dt, max_dt, disabled=False
     )
     groups_spec.append({"label": g4_label, "start": g4_start, "end": g4_end, "enabled": bool(g4_enabled)})
 
-    # Validate enabled groups have valid dates
     enabled_groups = [g for g in groups_spec if g["enabled"]]
     invalid_groups = []
     for g in enabled_groups:
@@ -761,27 +722,22 @@ else:
         st.error("Invalid date ranges for: " + ", ".join(invalid_groups))
         st.stop()
 
-    # Overlap warnings (pairwise across enabled groups)
     for i in range(len(enabled_groups)):
         for j in range(i + 1, len(enabled_groups)):
             gi, gj = enabled_groups[i], enabled_groups[j]
             if ranges_overlap(gi["start"], gi["end"], gj["start"], gj["end"]):
                 st.warning(f"Date ranges overlap: **{gi['label']}** and **{gj['label']}**. Overlapping periods will count in both groups.")
 
-    # Require at least 2 enabled groups
     if len(enabled_groups) < 2:
         st.info("Please enable at least **two** groups.")
         st.stop()
 
-    # Aggregate into selected groups
     agg_df = aggregate_from_ranges(df_raw, date_col, inf_col, bd_col, groups_spec)
 
-    # Compute and plot
     fig, rates, P, clean_df, alpha_used, alpha_source = compute_and_plot(
         agg_df.copy(), alpha_effective, alpha_override, show_annotations, show_ci_labels
     )
 
-    # Save PNG before rendering (used for exports)
     buf_png = io.BytesIO()
     fig.savefig(buf_png, format="png", dpi=160, bbox_inches="tight")
     img_png_bytes = buf_png.getvalue()
@@ -790,7 +746,6 @@ else:
     st.pyplot(fig, clear_figure=False)
     st.caption(f"α used: {alpha_used:.3f} — {alpha_source}")
 
-    # Tables
     rates_df = None
     p_df = None
     if rates is not None and clean_df is not None:
@@ -803,7 +758,6 @@ else:
         p_df = build_p_matrix_df(P)
         st.dataframe(p_df.style.format("{:.3f}"), use_container_width=True)
 
-    # Downloads (auto-delete after export)
     png_clicked = st.download_button(
         "Download figure as PNG",
         data=img_png_bytes,

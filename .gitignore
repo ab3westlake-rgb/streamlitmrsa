@@ -2,3 +2,4 @@
 /rangeapp.py
 /rangeexport.py
 /streamlitmrsa
+.streamlit/secrets.toml
